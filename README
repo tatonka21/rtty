@@ -1,7 +1,17 @@
 rtty -- multiuser "tip"/"cu" replacement with logging
 Paul Vixie <vixie@pa.dec.com> -- 1-January-1992 [V2.0 released]
 Paul Vixie <paul@vix.com> -- 27-December-1993 [V3.0 released]
-$Id: README,v 1.7 1996/08/23 22:25:25 vixie Exp $
+Michael Richardson <mcr@sandelman.ca> - 25-January-2010 [V3.3]
+OLD $Id: README,v 1.7 1996/08/23 22:25:25 vixie Exp $
+
+
+3.3 Release Notes (2010-01-25. Happy Birthday Robbie Burns!)
+
+Applied patches to make it work on Linux (which is broken TERMIOS), 
+and unfortunately to hard code it into /sandel.  I would like to debianize
+it and make it into a package, and maybe merge with Mouse's equivalent.
+
+Posted to github.
 
 3.2 Release Notes (23-August-1996)
 
