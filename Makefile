@@ -20,7 +20,7 @@ VERSION = 3.2
 VPATH = ../src
 
 DESTROOT =
-DESTPATH = $(DESTROOT)/usr/local/rtty
+DESTPATH = $(DESTROOT)/sandel/rtty
 DESTBIN = $(DESTPATH)/bin
 
 CC = cc
@@ -39,7 +39,7 @@ CDEFS = -DDEBUG -UWANT_TCPIP -UNEED_BITYPES_H -UNEED_STRDUP -UNEED_INET_ATON \
 	-UNO_SOCKADDR_LEN -UNO_HSTRERROR
 #
 CFLAGS = $(CDEBUG) $(CDEFS) -I/usr/local/include
-LIBS = 
+LIBS = -lcrypt
 #(if WANT_TCPIP defined and this isn't in your libc)
 # -lresolv
 #(if the resolver needs it, which BIND>=4.9's will on BSD>=4.4 systems)
