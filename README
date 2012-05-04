@@ -1,17 +1,24 @@
 rtty -- multiuser "tip"/"cu" replacement with logging
-Paul Vixie <vixie@pa.dec.com> -- 1-January-1992 [V2.0 released]
+Paul Vixie <vixie@isc.org> -- 24-March-2001 [V4.0 released]
 Paul Vixie <paul@vix.com> -- 27-December-1993 [V3.0 released]
-Michael Richardson <mcr@sandelman.ca> - 25-January-2010 [V3.3]
-OLD $Id: README,v 1.7 1996/08/23 22:25:25 vixie Exp $
+Paul Vixie <vixie@pa.dec.com> -- 1-January-1992 [V2.0 released]
+$Id: README,v 1.13 2002/06/30 20:26:53 vixie Exp $
 
+4.1 Release Notes (28-June-2002)
 
-3.3 Release Notes (2010-01-25. Happy Birthday Robbie Burns!)
+More portability/lint work.  Make ~^Z work again (used to wedge on resume)
+Add -R option to ttysrv for rts/cts flow control. (remove nonfunctional -o option)
+Add -e option to rtty to set escape character (default '~').  (ed gould)
 
-Applied patches to make it work on Linux (which is broken TERMIOS), 
-and unfortunately to hard code it into /sandel.  I would like to debianize
-it and make it into a package, and maybe merge with Mouse's equivalent.
+4.0 Release Notes (24-March-2001)
 
-Posted to github.
+Portability to POSIX/ANSI systems (pre-ANSI or pre-POSIX no longer supported.)
+Uses nonblocking I/O to terminals rather than depending on undependablt VMIN=0.
+Massive delinting (now passes "gcc -Wall".)
+
+3.3 Release Notes (22-August-1997)
+
+Portability to BSD/OS 3.0, bug fixes, better logging.
 
 3.2 Release Notes (23-August-1996)
 
@@ -24,7 +31,11 @@ way system routines were declared; the result also works fine on Ultrix 4.2
 and should work OK on any modern system, especially POSIX 1003.1 compatible
 systems.  I cleaned up the IP/TCP transport in case anyone wants to try it;
 in particular there is now a challenge/response for passwords (this used to be
-"wide open" which is why I always discouraged its use before.)
+"wide open" which is why I always discouraged its use before.)  NOTE: TCP/IP
+transport here is still utterly dangerous since it sends your whole session
+in clear text over the wire.  It's far better to ssh or krlogin into the rtty
+server and run "console" locally than to turn on WANT_TCPIP and use rtty over
+the network.  YOU HAVE BEEN WARNED.
 
 There are some things on my to-do list that I'd like someone else to work on:
    ->	public/private challenge/response, or kerberos, or both
@@ -55,7 +66,7 @@ Rtty is "remote tty" (not radioteletype).  You run a server per port
 and then connect to that server from any number of "tip"/"cu"-like
 clients.  I wrote it for our console concentrator, but there's no
 reason other than performance why you couldn't use it to drive modems,
-printers, prom programmers, and so on.
+printers, prom programmers, and so on.  It's 8-bit clean.
 
 When you connect to the server from more than one client, all clients
 will see the same session and all clients can type at and see output

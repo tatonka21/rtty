@@ -3,7 +3,7 @@
  */
 
 #ifndef LINT
-static char RCSid[] = "$Id: ttysrv.c,v 1.15 1996/08/23 22:25:25 vixie Exp $";
+static char RCSid[] = "$Id: ttysrv.c,v 1.25 2005/04/25 15:53:56 vixie Exp $";
 #endif
 
 /* Copyright (c) 1996 by Internet Software Consortium.
@@ -38,13 +38,21 @@ static char RCSid[] = "$Id: ttysrv.c,v 1.15 1996/08/23 22:25:25 vixie Exp $";
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <netdb.h>
 #include <pwd.h>
+#include <time.h>
+#include <unistd.h>
+
+#if defined(DEBUG) && !defined(dprintf)
+#define dprintf if (Debug) lprintf
+#else
+#define	dprintf (void)
+#endif
 
 #include "rtty.h"
-#ifdef NEED_BITYPES_H
-# include "bitypes.h"
-#endif
+#include "misc.h"
 #include "ttyprot.h"
 #ifdef WANT_TCPIP
 # include "locbrok.h"
@@ -59,41 +67,25 @@ struct whoson {
 };
 
 #define MAX_AUTH_ATTEMPTS 3
-#define USAGE_STR "{-o option} [-s LServ|-r RServ] [-l Log]\n\
-	-t Tty [-b Baud] [-p Parity] [-w Wordsize] [-i Pidfile]"
+#define USAGE_STR "[-s LServ|-r RServ] [-l Log]\n\
+	-t Tty [-b Baud] [-p Parity] [-w Wordsize] [-i Pidfile] [-R]"
 
-#ifdef USE_STDLIB
-#include <stdlib.h>
-#else
-extern	void		free __P((void *));
-#endif
-
-#ifdef USE_UNISTD
-#include <unistd.h>
-#else
-extern	int		gethostname __P((char *, int));
-extern	char		*crypt __P((const char *key, const char *setting));
-#endif
-
-extern	int		optind, opterr,
-			getopt __P((int, char * const *, const char *));
-extern	char		*optarg;
 
 #ifdef DEBUG
 int			Debug = 0;
 #endif
 
-extern	int		rconnect __P((char *host, char *service,
-				      FILE *verbose, FILE *errors,
-				      int timeout));
+extern	int		rconnect(char *host, char *service,
+				 FILE *verbose, FILE *errors,
+				 int timeout);
 extern	char		Version[];
 
-static	char		*ProgName = "amnesia",
-			*LServSpec = NULL,
+static	const char	*ProgName = "amnesia",
+			*Parity = "none";
+static	char		*LServSpec = NULL,
 			*RServSpec = NULL,
 			*TtySpec = NULL,
 			*LogSpec = NULL,
-			*Parity = "none",
 			ParityBuf[TP_MAXVAR],
 			*PidFile = NULL;
 static	int		LServ = -1,
@@ -104,9 +96,13 @@ static	int		LServ = -1,
 			Baud = 9600,
 			Wordsize = 8,
 			highest_fd = -1,
+#ifdef WANT_TCPIP
 			LocBrok = -1,
+#endif
 			Sigpiped = 0;
+#ifdef WANT_TCPIP
 static	u_int		Port;
+#endif
 static	struct termios	Ttyios, Ttyios_orig;
 static	FILE		*LogF = NULL;
 static	fd_set		Clients;
@@ -118,45 +114,37 @@ static	struct timeval	TOinput = {0, 3000};	/* 3ms: >1byte @9600baud */
 static	struct timeval	TOflush = {1, 0};	/* 1 second */
 static	struct whoson	**WhosOn;
 
-static	char		*handle_option __P((char *));
-static	void		main_loop __P((void)),
-			tty_input __P((int, int)),
-			broadcast __P((u_char *, int, u_int)),
-			sigpipe __P((int)),
-			sighup __P((int)),
-			open_log __P((void)),
-			quit __P((int)),
-			serv_input __P((int)),
-			client_input __P((int)),
-			close_client __P((int)),
-			set_parity __P((u_int)),
-			set_wordsize __P((u_int)),
-			auth_needed __P((int)),
-			auth_ok __P((int));
+static	void		main_loop(void),
+			tty_input(int, int),
+			broadcast(u_char *, int, u_int),
+			sigpipe(int),
+			sighup(int),
+			open_log(void),
+			quit(int),
+			serv_input(int),
+			client_input(int),
+			close_client(int),
+			set_parity(u_int),
+			set_wordsize(u_int),
+			set_rtscts(int),
+			auth_needed(int),
+			auth_ok(int),
+			lprintf(FILE *, const char *, ...);
 
-static	int		set_baud __P((int)),
-			find_parity __P((char *)),
-			find_wordsize __P((int));
+static	int		set_baud(int),
+			get_baud(speed_t),
+			find_parity(const char *),
+			find_wordsize(int);
 
 int
-main(argc, argv)
-	int argc;
-	char *argv[];
-{
-	int i;
-	char ch, *msg;
+main(int argc, char *argv[]) {
+	int i, ch, want_rtscts = 0;
 
 	gethostname(Hostname, sizeof Hostname);
 	ProgName = argv[0];
 
-	while ((ch = getopt(argc, argv, "o:s:r:t:l:b:p:w:x:i:")) != EOF) {
+	while ((ch = getopt(argc, argv, "s:r:t:l:b:p:w:x:i:R")) != -1) {
 		switch (ch) {
-		case 'o':
-			msg = handle_option(optarg);
-			if (msg) {
-				USAGE((stderr, "%s: bad option (%s): %s\n",
-				       ProgName, optarg, msg));
-			}
 		case 's':
 			LServSpec = optarg;
 			break;
@@ -191,6 +179,9 @@ main(argc, argv)
 		case 'i':
 			PidFile = optarg;
 			break;
+		case 'R':
+			want_rtscts++;
+			break;
 		default:
 			USAGE((stderr, "%s: getopt=%c ?\n", ProgName, ch));
 		}
@@ -204,11 +195,12 @@ main(argc, argv)
 		perror(TtySpec);
 		exit(2);
 	}
-	dprintf(stderr, "ttysrv.main: tty open on fd%d\n", Tty);
+	dprintf(stderr, "main: tty open on fd%d\n", Tty);
 	tcgetattr(Tty, &Ttyios);
 	Ttyios_orig = Ttyios;
-	prepare_term(&Ttyios);
-	set_baud(Baud);
+	prepare_term(&Ttyios, 0);
+	(void) set_baud(Baud);
+	set_rtscts(want_rtscts);
 
 	if ((i = find_parity(Parity)) == -1) {
 		USAGE((stderr, "%s: parity %s ?\n", ProgName, Parity));
@@ -232,6 +224,7 @@ main(argc, argv)
 	if (LServSpec) {
 		struct sockaddr_un n;
 		struct stat statbuf;
+		int cc;
 
 		if (LServSpec[0] != '/') {
 			USAGE((stderr, "%s: -s must specify local pathname\n",
@@ -252,8 +245,8 @@ main(argc, argv)
 			}
 		}
 
-		ASSERT(0<=bind(LServ, (struct sockaddr *)&n, sizeof n),
-		       n.sun_path);
+		cc = bind(LServ, (struct sockaddr *)&n, sizeof n);
+		ASSERT(cc >= 0, n.sun_path);
 	}
 #ifdef WANT_TCPIP
 	if (RServSpec) {
@@ -293,9 +286,8 @@ main(argc, argv)
 	}
 #endif
 
-	if (LogSpec) {
+	if (LogSpec)
 		open_log();
-	}
 
 	if (PidFile) {
 		FILE *f = fopen(PidFile, "w");
@@ -311,16 +303,16 @@ main(argc, argv)
 					   sizeof(struct whoson **));
 
 	main_loop();
+	exit(0);
 }
 
 static void
-main_loop()
-{
+main_loop(void) {
 	if (LServ != -1)
 		listen(LServ, 10);
 	if (RServ != -1)
 		listen(RServ, 10);
-	dprintf(stderr, "ttysrv.main: LServ=%d, RServ=%d\n", LServ, RServ);
+	dprintf(stderr, "main: LServ=%d, RServ=%d\n", LServ, RServ);
 	signal(SIGPIPE, sigpipe);
 	signal(SIGHUP, sighup);
 	FD_ZERO(&Clients);
@@ -336,9 +328,11 @@ main_loop()
 		if (RServ != -1)
 			FD_SET(RServ, &readfds);
 		FD_SET(Tty, &readfds);
-#if 0
-		dprintf(stderr, "ttysrv.main_loop: select(%d,%08x)\n",
-			highest_fd+1, readfds.fds_bits[0]);
+#if defined(DEBUG)
+		if (Debug > 2)
+			lprintf(stderr,
+				"main_loop: select(%d) LD=%d\n",
+				highest_fd+1, LogDirty);
 #endif
 		nfound = select(highest_fd+1, &readfds, NULL, NULL,
 				(LogDirty ?&TOflush :NULL));
@@ -349,15 +343,15 @@ main_loop()
 			LogDirty = FALSE;
 		}
 		Now = time(0);
-#if 0
-		dprintf(stderr, "ttysrv.main_loop: select->%d\n", nfound);
+#ifdef DEBUG
+		if (Debug > 2)
+			lprintf(stderr, "main_loop: select->%d\n", nfound);
 #endif
 		for (fd = 0; fd <= highest_fd; fd++) {
 			if (!FD_ISSET(fd, &readfds)) {
 				continue;
 			}
-			dprintf(stderr, "ttysrv.main_loop: fd%d readable\n",
-				fd);
+			dprintf(stderr, "main_loop: fd%d readable\n", fd);
 			if (fd == Tty) {
 				tty_input(fd, FALSE);
 				tty_input(fd, TRUE);
@@ -368,26 +362,28 @@ main_loop()
 			}
 		}
 	}
+	/*NOTREACHED*/
 }
 
 static void
-tty_input(fd, aggregate) {
+tty_input(int fd, int aggregate) {
 	u_char buf[TP_MAXVAR];
-	int nchars, x;
+	int nchars, x, nloops;
 
 	nchars = 0;
+	nloops = 0;
 	do {
+		nloops++;
 		x = read(fd, buf+nchars, TP_MAXVAR-nchars);
 	} while ((x > 0) &&
 		 ((nchars += x) < TP_MAXVAR) &&
 		 (aggregate && !select(0, NULL, NULL, NULL, &TOinput))
 		 )
 	;
-	if (nchars == 0) return;
 #ifdef DEBUG
 	if (Debug) {
-		fprintf(stderr, "ttysrv.tty_input: %d bytes read on fd%d",
-			nchars, fd);
+		lprintf(stderr, "tty_input: %d bytes read on fd%d (nl %d)",
+			nchars, fd, nloops);
 		if (Debug > 1) {
 			fputs(": \"", stderr);
 			cat_v(stderr, buf, nchars);
@@ -396,6 +392,8 @@ tty_input(fd, aggregate) {
 		fputc('\n', stderr);
 	}
 #endif
+	if (nchars == 0)
+		return;
 	if (LogF) {
 		if (nchars != fwrite(buf, sizeof(char), nchars, LogF)) {
 			perror("fwrite(LogF)");
@@ -407,11 +405,7 @@ tty_input(fd, aggregate) {
 }
 
 static void
-broadcast(buf, nchars, typ)
-	u_char *buf;
-	int nchars;
-	u_int typ;
-{
+broadcast(u_char *buf, int nchars, u_int typ) {
 	int fd, x;
 
 	for (fd = 0;  fd <= highest_fd;  fd++) {
@@ -422,10 +416,10 @@ broadcast(buf, nchars, typ)
 		Sigpiped = 0;
 		x = tp_senddata(fd, buf, nchars, typ);
 		dprintf(stderr,
-			"ttysrv.tty_input: %d bytes sent to client on fd%d\n",
+			"tty_input: %d bytes sent to client on fd%d\n",
 			x, fd);
 		if (Sigpiped) {
-			dprintf(stderr, "ttysrv.tty_input: sigpipe on fd%d\n",
+			dprintf(stderr, "tty_input: sigpipe on fd%d\n",
 				fd);
 			close_client(fd);
 		}
@@ -433,7 +427,7 @@ broadcast(buf, nchars, typ)
 }
 
 static void
-serv_input(fd) {
+serv_input(int fd) {
 	struct sockaddr_un un;
 	struct sockaddr_in in;
 	struct sockaddr *sa;
@@ -450,18 +444,15 @@ serv_input(fd) {
 		abort();
 	}
 
-	dprintf(stderr, "ttysrv.serv_input: accepting on fd%d\n", fd);
+	dprintf(stderr, "serv_input: accepting on fd%d\n", fd);
 
 	if ((fd = accept(fd, sa, &fromlen)) == -1) {
 		perror("accept");
 		return;
 	}
 
-	dprintf(stderr, "ttysrv.serv_input: accepted fd%d\n", fd);
+	dprintf(stderr, "serv_input: accepted fd%d\n", fd);
 
-#if 0
-	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
-#endif
 	FD_SET(fd, &Clients);
 	if (fd > highest_fd) {
 		highest_fd = fd;
@@ -473,7 +464,7 @@ serv_input(fd) {
 	WhosOn[fd]->lastInput = Now;
 	WhosOn[fd]->auth = NULL;
 	if (sa == (struct sockaddr *) &un) {
-		WhosOn[fd]->host = strdup(Hostname);
+		WhosOn[fd]->host = safe_strdup(Hostname);
 		WhosOn[fd]->type = local;
 		auth_ok(fd);
 	} else if (sa == (struct sockaddr *) &in) {
@@ -482,9 +473,9 @@ serv_input(fd) {
 		hp = gethostbyaddr((char *)&in.sin_addr,
 				   sizeof(in.sin_addr),
 				   in.sin_family);
-		WhosOn[fd]->host = strdup(hp
-					  ? hp->h_name
-					  : inet_ntoa(in.sin_addr));
+		WhosOn[fd]->host = safe_strdup(hp
+					       ? hp->h_name
+					       : inet_ntoa(in.sin_addr));
 		WhosOn[fd]->type = remote;
 		auth_needed(fd);
 	} else {
@@ -494,9 +485,9 @@ serv_input(fd) {
 }
 
 static void
-client_input(fd) {
-	struct passwd *pw;
+client_input(int fd) {
 	int nchars, i, new, query;
+	struct passwd *pw;
 	u_short salt;
 	char s[3];
 	u_int f;
@@ -523,15 +514,9 @@ client_input(fd) {
 	f = ntohs(T.f) & TP_TYPEMASK;
 #ifdef DEBUG
 	if (Debug) {
-		fprintf(stderr,
-			"ttysrv: #%d fd%d i=0x%x o='%c' f=0x%x",
+		lprintf(stderr,
+			"client_input: nchars=%d fd%d i=0x%x o='%c' f=0x%x\n",
 			nchars, fd, i, query?'Q':' ', f);
-		if (Debug > 1) {
-			fputs(": \"", stderr);
-			cat_v(stderr, (u_char *)&T, nchars);
-			fputs("\"", stderr);
-		}
-		fputc('\n', stderr);
 	}
 #endif
 	switch (f) {
@@ -540,6 +525,7 @@ client_input(fd) {
 			close_client(fd);
 			break;
 		}
+		dprintf(stderr, "client_input: TP_DATA, nchars=%d\n", nchars);
 		if (WhosOn[fd]->state != auth)
 			break;
 # if WANT_CLIENT_LOGGING
@@ -552,31 +538,36 @@ client_input(fd) {
 		}
 # endif /*WANT_CLIENT_LOGGING*/
 		nchars = write(Tty, T.c, nchars);
+#ifdef DEBUG
+		if (Debug > 2) {
+			lprintf(stderr, "client_input: wrote to tty: \"");
+			cat_v(stderr, (u_char *)&T.c, nchars);
+			fputs("\"\n", stderr);
+		}
+#endif
 		break;
 	case TP_BREAK:
 		if (WhosOn[fd]->state != auth)
 			break;
-		dprintf(stderr, "ttysrv.client_input: sending break\n");
+		dprintf(stderr, "client_input: sending break\n");
 		tcsendbreak(Tty, 0);
 		tp_senddata(fd, (u_char *)"BREAK", 5, TP_NOTICE);
-		if (LogF) {
+		if (LogF)
 			fputs("[BREAK]", LogF);
-		}
-		dprintf(stderr, "ttysrv.client_input: done sending break\n");
+		dprintf(stderr, "client_input: done sending break\n");
 		break;
 	case TP_BAUD:
 		if (WhosOn[fd]->state != auth)
 			break;
 		if (query) {
-			tp_sendctl(fd, TP_BAUD|TP_QUERY, Baud, NULL);
+			tp_sendctl(fd, TP_BAUD|TP_QUERY, get_baud(Baud), NULL);
 			break;
 		}
 		if ((set_baud(i) >= 0) &&
 		    (install_ttyios(Tty, &Ttyios) >= 0)) {
 			Baud = i;
-			if (LogF) {
+			if (LogF)
 				fprintf(LogF, "[baud now %d]", i);
-			}
 			tp_sendctl(fd, TP_BAUD, 1, NULL);
 		} else {
 			tp_sendctl(fd, TP_BAUD, 0, NULL);
@@ -622,7 +613,7 @@ client_input(fd) {
 		} else {
 			Wordsize = i;
 			set_wordsize(new);
-			install_ttyios(&Tty, &Ttyios);
+			install_ttyios(Tty, &Ttyios);
 			if (LogF) {
 				fprintf(LogF, "[wordsize now %d]", i);
 			}
@@ -662,7 +653,7 @@ client_input(fd) {
 		if (WhosOn[fd]) {
 			if (WhosOn[fd]->who)
 				free(WhosOn[fd]->who);
-			WhosOn[fd]->who = strdup((char *)T.c);
+			WhosOn[fd]->who = safe_strdup((char *)T.c);
 		}
 		{ /*local*/
 			char buf[TP_MAXVAR];
@@ -732,7 +723,7 @@ client_input(fd) {
 			auth_ok(fd);
 		} else {
 			WhosOn[fd]->state = wpasswd;
-			WhosOn[fd]->auth = strdup(pw->pw_passwd);
+			WhosOn[fd]->auth = safe_strdup(pw->pw_passwd);
 			salt = WhosOn[fd]->auth[0]<<8 | WhosOn[fd]->auth[1];
 			tp_sendctl(fd, TP_PASSWD|TP_QUERY, salt, NULL);
 		}
@@ -764,15 +755,13 @@ client_input(fd) {
 		}
 		break;
 	default:
-		fprintf(stderr, "ttysrv: bad T: f=0x%x\n", ntohs(T.f));
+		dprintf(stderr, "client_input: bad T: f=0x%x\n", ntohs(T.f));
 		break;
 	}
 }
 
 static void
-close_client(fd)
-	int fd;
-{
+close_client(int fd) {
 	dprintf(stderr, "close_client: fd%d\n", fd);
 	close(fd);
 	FD_CLR(fd, &Clients);
@@ -792,7 +781,7 @@ close_client(fd)
 	}
 }
 
-struct partab { char *parity; int sysparity; } partab[] = {
+struct partab { const char *parity; int sysparity; } partab[] = {
 	{ "even", PARENB },
 	{ "odd", PARENB|PARODD },
 	{ "none", 0 },
@@ -807,19 +796,103 @@ struct cstab { int wordsize, syswordsize; } cstab[] = {
 	{ 0, -1 }
 };
 
+#define baud(b) {(b), (B ## b)}
+
+static struct baud_map {
+    int         bps;            /* bits per second */
+    speed_t     code;           /* code to select speed */
+} baud_map[] = {
+        baud(0),
+        baud(50),
+        baud(75),
+        baud(110),
+        baud(134),
+        baud(150),
+        baud(200),
+        baud(300),
+        baud(600),
+        baud(1200),
+        baud(1800),
+        baud(2400),
+        baud(4800),
+        baud(9600),
+        baud(19200),
+        baud(38400),
+        baud(57600),
+        baud(115200),
+        baud(230400),
+
+#if defined(B460800)		/* higher speeds are not always defined */
+        baud(460800),
+#endif
+#if defined(B500000)
+        baud(500000),
+#endif
+#if defined(B576000)
+        baud(576000),
+#endif
+#if defined(B921600)
+        baud(921600),
+#endif
+#if defined(B1000000)
+        baud(1000000),
+#endif
+#if defined(B1152000)
+        baud(1152000),
+#endif
+#if defined(B1500000)
+        baud(1500000),
+#endif
+#if defined(B2000000)
+        baud(2000000),
+#endif
+#if defined(B2500000)
+        baud(2500000),
+#endif
+#if defined(B3000000)
+        baud(3000000),
+#endif
+#if defined(B3500000)
+        baud(3500000),
+#endif
+#if defined(B4000000)
+        baud(4000000),
+#endif
+
+        {-1, -1}
+};
+
+#undef baud
+
 static int
-set_baud(baud) {
-	if (cfsetispeed(&Ttyios, baud) < 0)
-		return -1;
-	if (cfsetospeed(&Ttyios, baud) < 0)
-		return -1;
-	return 0;
+set_baud(int baud) {
+	struct baud_map *bp;
+
+	for (bp = baud_map; bp->bps != -1; bp++) {
+		if (baud == bp->bps) {
+			if (cfsetispeed(&Ttyios, bp->code) < 0)
+				return (-1);
+			if (cfsetospeed(&Ttyios, bp->code) < 0)
+				return (-1);
+			return (0);
+		}
+	}
+	return (-1);
 }
 
 static int
-find_parity(parity)
-	char *parity;
-{
+get_baud(speed_t code) {
+	struct baud_map *bp;
+
+	for (bp = baud_map; bp->bps != -1; bp++) {
+		if (code == bp->code)
+			return (bp->bps);
+	}
+	return (-1);
+}
+
+static int
+find_parity(const char *parity) {
 	struct partab *parp;
 	int sysparity = -1;
 
@@ -828,19 +901,17 @@ find_parity(parity)
 			sysparity = parp->sysparity;
 		}
 	}
-	return sysparity;
+	return (sysparity);
 }
 
 static void
-set_parity(parity)
-	u_int parity;
-{
+set_parity(u_int parity) {
 	Ttyios.c_cflag &= ~(PARENB|PARODD);
 	Ttyios.c_cflag |= parity;
 }
 
 static int
-find_wordsize(wordsize) {
+find_wordsize(int wordsize) {
 	struct cstab *csp;
 	int syswordsize = -1;
 
@@ -848,31 +919,26 @@ find_wordsize(wordsize) {
 		if (csp->wordsize == wordsize)
 			syswordsize = csp->syswordsize;
 	}
-	return syswordsize;
+	return (syswordsize);
 }
 
 static void
-set_wordsize(wordsize)
-	u_int wordsize;
-{
+set_wordsize(u_int wordsize) {
 	Ttyios.c_cflag &= ~CSIZE;
 	Ttyios.c_cflag |= wordsize;
 }
 
-static char *
-handle_option(option)
-	char *option;
-{
-	if (!strcmp("nolocal", option)) {
-		Ttyios.c_cflag &= ~CLOCAL;
+static void
+set_rtscts(int want_rtscts) {
+	if (want_rtscts) {
+		Ttyios.c_cflag |= RTTY_RTSCTS;
 	} else {
-		return "unrecognized";
+		Ttyios.c_cflag &= ~RTTY_RTSCTS;
 	}
-	return NULL;
 }
 
 static void
-auth_needed(fd) {
+auth_needed(int fd) {
 	char data[TP_MAXVAR];
 
 	sprintf(data, "authorization needed");
@@ -882,7 +948,7 @@ auth_needed(fd) {
 }
 
 static void
-auth_ok(fd) {
+auth_ok(int fd) {
 	char data[TP_MAXVAR];
 
 	sprintf(data, "authorized");
@@ -891,12 +957,12 @@ auth_ok(fd) {
 }
 
 static void
-sigpipe(x) {
+sigpipe(int x) {
 	Sigpiped++;
 }
 
 static void
-sighup(x) {
+sighup(int x) {
 	if (LogF) {
 		fclose(LogF);
 		LogF = NULL;
@@ -906,7 +972,7 @@ sighup(x) {
 }
 
 static void
-open_log() {
+open_log(void) {
 	if (!(LogF = fopen(LogSpec, "a+"))) {
 		perror(LogSpec);
 		fprintf(stderr, "%s: can't open log file\n", ProgName);
@@ -914,10 +980,29 @@ open_log() {
 }
 
 static void
-quit(x) {
-	fprintf(stderr, "\r\nttysrv exiting\r\n");
-	if (Ttyios_set && (Tty != -1)) {
+quit(int x) {
+	dprintf(stderr, "\r\nttysrv exiting\r\n");
+	if (Ttyios_set && (Tty != -1))
 		(void) install_ttyios(Tty, &Ttyios_orig);
-	}
 	exit(0);
 }
+
+#ifdef DEBUG
+static void
+lprintf(FILE *fp, const char *fmt, ...) {
+	va_list ap;
+	struct timeval tvnow;
+	struct tm *tmnow;
+	time_t now;
+
+	va_start(ap, fmt);
+	(void) gettimeofday(&tvnow, NULL);
+	now = (time_t) tvnow.tv_sec;
+	tmnow = localtime(&now);
+	fprintf(fp, "%02d:%02d:%02d.%03d ",
+		tmnow->tm_hour, tmnow->tm_min, tmnow->tm_sec,
+		(int) (tvnow.tv_usec / 1000));
+	vfprintf(fp, fmt, ap);
+	va_end(ap);
+}
+#endif
